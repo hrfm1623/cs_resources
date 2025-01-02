@@ -1,0 +1,39 @@
+name: Sync to Google Cloud Storage
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "images/origin/**"
+
+jobs:
+  sync-to-gcs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Cloud SDK
+        uses: "google-github-actions/auth@v1"
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: "google-github-actions/setup-gcloud@v1"
+
+      - name: Sync files to GCS
+        run: |
+          # 削除されたファイルの同期
+          git diff-tree --no-commit-id --name-status -r ${{ github.sha }} | grep '^D' | cut -f2- | while read file; do
+            if [[ ! "$file" =~ ^images/origin/ ]]; then
+              gsutil rm "gs://cs_resources/$file" || true
+            fi
+          done
+
+          # 新規・更新ファイルの同期
+          git diff-tree --no-commit-id --name-status -r ${{ github.sha }} | grep '^[AM]' | cut -f2- | while read file; do
+            if [[ ! "$file" =~ ^images/origin/ ]]; then
+              gsutil cp "$file" "gs://cs_resources/$file"
+            fi
+          done
