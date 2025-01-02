@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
       - name: Set up Cloud SDK
         uses: "google-github-actions/auth@v1"
@@ -27,13 +29,6 @@ jobs:
         run: |
           echo "Starting sync process..."
 
-          # GCPの認証状態を確認
-          gcloud auth list
-
-          # プロジェクトIDを確認
-          echo "Current project:"
-          gcloud config get-value project
-
           # バケットが存在することを確認
           echo "Checking bucket..."
           if ! gsutil ls gs://cs_resources > /dev/null 2>&1; then
@@ -44,34 +39,39 @@ jobs:
 
           # 現在のリポジトリ内のファイルを確認（デバッグ用）
           echo "Files in repository:"
-          find . -type f -not -path '*/\.*' -not -path '*/images/origin/*'
+          find . -type f -not -path '*/\.*' -not -path '*/images/origin/*' -not -path './gha-creds-*.json'
 
-          # コミット情報の確認
-          echo "Commit information:"
-          git log -1
+          # 前回のコミットハッシュを取得
+          PREVIOUS_COMMIT=$(git rev-parse HEAD^1 2>/dev/null || echo "initial")
 
-          # 変更されたファイルの確認
-          echo "Changed files:"
-          git diff-tree --no-commit-id --name-status -r ${{ github.sha }}
-
-          # 削除されたファイルの同期
-          echo "Processing deleted files..."
-          git diff-tree --no-commit-id --name-status -r ${{ github.sha }} | grep '^D' | cut -f2- | while read file; do
-            if [[ ! "$file" =~ ^images/origin/ ]]; then
-              echo "Deleting: $file"
-              gsutil rm "gs://cs_resources/$file" || true
-            fi
-          done
-
-          # 新規・更新ファイルの同期
-          echo "Processing new/modified files..."
-          git diff-tree --no-commit-id --name-status -r ${{ github.sha }} | grep '^[AM]' | cut -f2- | while read file; do
-            if [[ ! "$file" =~ ^images/origin/ ]]; then
-              if [ -f "$file" ]; then
-                echo "Uploading: $file"
-                gsutil -m cp "$file" "gs://cs_resources/$file"
+          if [ "$PREVIOUS_COMMIT" = "initial" ]; then
+            echo "Initial commit detected - uploading all files"
+            # 初回コミット時は全ファイルをアップロード
+            find . -type f -not -path '*/\.*' -not -path '*/images/origin/*' -not -path './gha-creds-*.json' | while read file; do
+              # ファイルパスから先頭の "./" を削除
+              relative_path=${file#./}
+              echo "Uploading: $relative_path"
+              gsutil -m cp "$file" "gs://cs_resources/$relative_path"
+            done
+          else
+            echo "Processing changes since previous commit"
+            # 変更されたファイルの確認
+            git diff --name-status $PREVIOUS_COMMIT HEAD | while read status file; do
+              if [[ ! "$file" =~ ^images/origin/ ]] && [[ ! "$file" =~ ^\.git ]]; then
+                case $status in
+                  D)
+                    echo "Deleting: $file"
+                    gsutil rm "gs://cs_resources/$file" || true
+                    ;;
+                  A|M)
+                    if [ -f "$file" ]; then
+                      echo "Uploading: $file"
+                      gsutil -m cp "$file" "gs://cs_resources/$file"
+                    fi
+                    ;;
+                esac
               fi
-            fi
-          done
+            done
+          fi
 
           echo "Sync process completed."
