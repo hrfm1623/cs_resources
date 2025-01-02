@@ -24,9 +24,20 @@ jobs:
 
       - name: Sync files to GCS
         run: |
+          # バケットが存在することを確認
+          if ! gsutil ls gs://cs_resources > /dev/null 2>&1; then
+            echo "Error: Bucket gs://cs_resources does not exist"
+            exit 1
+          fi
+
+          # 現在のリポジトリ内のファイルを確認（デバッグ用）
+          echo "Files in repository:"
+          find . -type f -not -path '*/\.*' -not -path '*/images/origin/*'
+
           # 削除されたファイルの同期
           git diff-tree --no-commit-id --name-status -r ${{ github.sha }} | grep '^D' | cut -f2- | while read file; do
             if [[ ! "$file" =~ ^images/origin/ ]]; then
+              echo "Deleting: $file"
               gsutil rm "gs://cs_resources/$file" || true
             fi
           done
@@ -34,6 +45,10 @@ jobs:
           # 新規・更新ファイルの同期
           git diff-tree --no-commit-id --name-status -r ${{ github.sha }} | grep '^[AM]' | cut -f2- | while read file; do
             if [[ ! "$file" =~ ^images/origin/ ]]; then
-              gsutil cp "$file" "gs://cs_resources/$file"
+              if [ -f "$file" ]; then
+                echo "Uploading: $file"
+                # ディレクトリが存在しない場合は作成
+                gsutil cp "$file" "gs://cs_resources/$file"
+              fi
             fi
           done
