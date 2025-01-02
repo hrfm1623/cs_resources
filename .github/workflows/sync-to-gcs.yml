@@ -20,58 +20,72 @@ jobs:
         uses: "google-github-actions/auth@v1"
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Set up Cloud SDK
         uses: "google-github-actions/setup-gcloud@v1"
 
-      - name: Sync files to GCS
+      - name: Verify GCP Setup
+        id: verify
         run: |
-          echo "Starting sync process..."
+          echo "Verifying GCP setup..."
 
-          # バケットが存在することを確認
-          echo "Checking bucket..."
-          if ! gsutil ls gs://cs_resources > /dev/null 2>&1; then
-            echo "Error: Bucket gs://cs_resources does not exist"
+          # 認証状態の確認
+          if ! gcloud auth list 2>&1 | grep -q "Credentialed Accounts"; then
+            echo "Error: GCP authentication failed"
             exit 1
           fi
-          echo "Bucket exists."
 
-          # 現在のリポジトリ内のファイルを確認（デバッグ用）
-          echo "Files in repository:"
-          find . -type f -not -path '*/\.*' -not -path '*/images/origin/*' -not -path './gha-creds-*.json'
+          # プロジェクトの確認
+          PROJECT=$(gcloud config get-value project)
+          if [ -z "$PROJECT" ]; then
+            echo "Error: No GCP project set"
+            exit 1
+          fi
+          echo "Using GCP Project: $PROJECT"
 
-          # 前回のコミットハッシュを取得
-          PREVIOUS_COMMIT=$(git rev-parse HEAD^1 2>/dev/null || echo "initial")
+          # バケットの確認
+          if ! gsutil ls gs://cs_resources > /dev/null 2>&1; then
+            echo "Error: Cannot access bucket gs://cs_resources"
+            exit 1
+          fi
+          echo "Successfully verified GCP setup"
 
-          if [ "$PREVIOUS_COMMIT" = "initial" ]; then
-            echo "Initial commit detected - uploading all files"
-            # 初回コミット時は全ファイルをアップロード
-            find . -type f -not -path '*/\.*' -not -path '*/images/origin/*' -not -path './gha-creds-*.json' | while read file; do
-              # ファイルパスから先頭の "./" を削除
-              relative_path=${file#./}
-              echo "Uploading: $relative_path"
-              gsutil -m cp "$file" "gs://cs_resources/$relative_path"
-            done
-          else
-            echo "Processing changes since previous commit"
-            # 変更されたファイルの確認
-            git diff --name-status $PREVIOUS_COMMIT HEAD | while read status file; do
-              if [[ ! "$file" =~ ^images/origin/ ]] && [[ ! "$file" =~ ^\.git ]]; then
-                case $status in
-                  D)
-                    echo "Deleting: $file"
-                    gsutil rm "gs://cs_resources/$file" || true
-                    ;;
-                  A|M)
-                    if [ -f "$file" ]; then
-                      echo "Uploading: $file"
-                      gsutil -m cp "$file" "gs://cs_resources/$file"
-                    fi
-                    ;;
-                esac
-              fi
-            done
+      - name: Upload to GCS
+        run: |
+          echo "Starting upload process..."
+
+          # アップロード対象ファイルの確認
+          FILES_TO_UPLOAD=$(find . -type f \
+            -not -path '*/\.*' \
+            -not -path '*/images/origin/*' \
+            -not -path './gha-creds-*.json')
+
+          if [ -z "$FILES_TO_UPLOAD" ]; then
+            echo "Error: No files found to upload"
+            exit 1
           fi
 
-          echo "Sync process completed."
+          # ファイル数をカウント
+          FILE_COUNT=$(echo "$FILES_TO_UPLOAD" | wc -l)
+          echo "Found $FILE_COUNT files to upload"
+
+          # アップロード処理
+          FAILED_UPLOADS=0
+          while IFS= read -r file; do
+            relative_path=${file#./}
+            echo "Uploading: $relative_path to gs://cs_resources/$relative_path"
+            if ! gsutil -m cp "$file" "gs://cs_resources/$relative_path"; then
+              echo "Error: Failed to upload $relative_path"
+              FAILED_UPLOADS=$((FAILED_UPLOADS + 1))
+            fi
+          done <<< "$FILES_TO_UPLOAD"
+
+          # 結果の確認
+          if [ $FAILED_UPLOADS -gt 0 ]; then
+            echo "Error: $FAILED_UPLOADS files failed to upload"
+            exit 1
+          fi
+
+          echo "Upload process completed successfully"
+          echo "Verifying uploaded files:"
+          gsutil ls -r gs://cs_resources/
